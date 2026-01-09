@@ -8,7 +8,6 @@
 #ifndef TCL_ESP_TCL_H
 #define TCL_ESP_TCL_H
 
-#include "windows.h"
 #include "esphome.h"
 #include "esphome/core/defines.h"
 #include "esphome/components/uart/uart.h"
