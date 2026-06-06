@@ -8,6 +8,9 @@
 #include "esphome/core/defines.h"
 #include "tclac.h"
 
+#include <cctype>
+#include <string>
+
 namespace esphome{
 namespace tclac{
 
@@ -564,12 +567,14 @@ void tclacClimate::sendData(uint8_t * message, uint8_t size) {
 }
 
 // Преобразование байта в читабельный формат
-String tclacClimate::getHex(uint8_t *message, uint8_t size) {
-	String raw;
+std::string tclacClimate::getHex(uint8_t *message, uint8_t size) {
+	std::string raw;
 	for (int i = 0; i < size; i++) {
-		raw += "\n" + String(message[i]);
+		raw += "\n" + std::to_string(message[i]);
 	}
-	raw.toUpperCase();
+	for (char &c : raw) {
+		c = toupper(static_cast<unsigned char>(c));
+	}
 	return raw;
 }
 
