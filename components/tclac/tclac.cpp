@@ -62,53 +62,42 @@ void tclacClimate::setup() {
 #endif
 }
 
-void tclacClimate::loop()  {
-	// Если в буфере UART что-то есть, то читаем это что-то
-	if (esphome::uart::UARTDevice::available() > 0) {
-		dataShow(0, true);
-		dataRX[0] = esphome::uart::UARTDevice::read();
-		// Если принятый байт- не заголовок (0xBB), то просто покидаем цикл
-		if (dataRX[0] != 0xBB) {
-			ESP_LOGD("TCL", "Wrong byte");
-			dataShow(0,0);
-			return;
-		}
-		// А вот если совпал заголовок (0xBB), то начинаем чтение по цепочке еще 4 байт
-		// Иногда, для некоторых кондиционеров все же нужно добавить delay(5) между пакетами. Зачем- ХЗ, но так надо. Но не всегда. Хотя иногда- да. Но не каждый раз. Изредка. Случается.
-		// delay(5);
-		dataRX[1] = esphome::uart::UARTDevice::read();
-		// delay(5);
-		dataRX[2] = esphome::uart::UARTDevice::read();
-		// delay(5);
-		dataRX[3] = esphome::uart::UARTDevice::read();
-		// delay(5);
-		dataRX[4] = esphome::uart::UARTDevice::read();
-
-		//auto raw = getHex(dataRX, 5);
-		
-		//ESP_LOGD("TCL", "first 5 byte : %s ", raw.c_str());
-
-		// Из первых 5 байт нам нужен пятый- он содержит длину сообщения
-		esphome::uart::UARTDevice::read_array(dataRX+5, dataRX[4]+1);
-
-		uint8_t check = getChecksum(dataRX, sizeof(dataRX));
-
-		//raw = getHex(dataRX, sizeof(dataRX));
-		
-		//ESP_LOGD("TCL", "RX full : %s ", raw.c_str());
-		
-		// Проверяем контрольную сумму
-		if (check != dataRX[60]) {
-			ESP_LOGD("TCL", "Invalid checksum %x", check);
-			this->dataShow(0,0);
-			return;
-		} else {
-			//ESP_LOGD("TCL", "checksum OK %x", check);
-		}
-		this->dataShow(0,0);
-		// Прочитав все из буфера приступаем к разбору данных
-		this->readData();
+void tclacClimate::loop() {
+	// Ждём полный пакет (61 байт @ 9600 ≈ 64 ms), иначе read() блокирует loop
+	if (this->available() < 1) {
+		return;
 	}
+
+	// Синхронизация по заголовку 0xBB
+	uint8_t header = this->read();
+	if (header != TCLAC_HEADER_BYTE) {
+		ESP_LOGD("TCL", "Skipping byte 0x%02X", header);
+		this->dataShow(0, false);
+		return;
+	}
+
+	if (this->available() < TCLAC_RX_PACKET_SIZE - 1) {
+		ESP_LOGD("TCL", "Incomplete packet after header");
+		return;
+	}
+
+	this->dataShow(0, true);
+	this->dataRX[0] = header;
+	this->read_array(this->dataRX + 1, TCLAC_RX_PACKET_SIZE - 1);
+	this->dataShow(0, false);
+
+	if (this->dataRX[4] != TCLAC_LENGTH_BYTE) {
+		ESP_LOGD("TCL", "Invalid length byte 0x%02X", this->dataRX[4]);
+		return;
+	}
+
+	uint8_t check = getChecksum(this->dataRX, sizeof(this->dataRX));
+	if (check != this->dataRX[60]) {
+		ESP_LOGD("TCL", "Invalid checksum 0x%02X", check);
+		return;
+	}
+
+	this->readData();
 }
 
 void tclacClimate::update() {

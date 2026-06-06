@@ -49,6 +49,10 @@ namespace tclac {
 #define SWING_BOTH			0b01100000
 #define SWING_MODE_MASK		0b01100000
 
+static constexpr size_t TCLAC_RX_PACKET_SIZE = 61;
+static constexpr uint8_t TCLAC_HEADER_BYTE = 0xBB;
+static constexpr uint8_t TCLAC_LENGTH_BYTE = 0x37;  // byte index 4, payload length field
+
 using climate::ClimateCall;
 using climate::ClimateMode;
 using climate::ClimatePreset;
