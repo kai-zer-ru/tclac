@@ -18,7 +18,6 @@ from esphome.const import (
 )
 
 from esphome.components.climate import (
-    ClimateFanMode,
     ClimateMode,
     ClimatePreset,
     ClimateSwingMode,
@@ -34,6 +33,7 @@ TCLAC_MAX_TEMPERATURE = 31.0
 TCLAC_TARGET_TEMPERATURE_STEP = 1.0
 TCLAC_CURRENT_TEMPERATURE_STEP = 1.0
 
+REPEAT_TX = "rep_tx"
 CONF_RX_LED = "rx_led"
 CONF_TX_LED = "tx_led"
 CONF_DISPLAY = "show_display"
@@ -48,14 +48,14 @@ tclac_ns = cg.esphome_ns.namespace("tclac")
 tclacClimate = tclac_ns.class_("tclacClimate", uart.UARTDevice, climate.Climate, cg.PollingComponent)
 
 SUPPORTED_FAN_MODES_OPTIONS = {
-    "AUTO": ClimateFanMode.CLIMATE_FAN_AUTO,  # Доступен всегда
-    "QUIET": ClimateFanMode.CLIMATE_FAN_QUIET,
-    "LOW": ClimateFanMode.CLIMATE_FAN_LOW,
-    "MIDDLE": ClimateFanMode.CLIMATE_FAN_MIDDLE,
-    "MEDIUM": ClimateFanMode.CLIMATE_FAN_MEDIUM,
-    "HIGH": ClimateFanMode.CLIMATE_FAN_HIGH,
-    "FOCUS": ClimateFanMode.CLIMATE_FAN_FOCUS,
-    "DIFFUSE": ClimateFanMode.CLIMATE_FAN_DIFFUSE,
+    "AUTO": ClimateMode.CLIMATE_FAN_AUTO,  # Доступен всегда
+    "QUIET": ClimateMode.CLIMATE_FAN_QUIET,
+    "LOW": ClimateMode.CLIMATE_FAN_LOW,
+    "MIDDLE": ClimateMode.CLIMATE_FAN_MIDDLE,
+    "MEDIUM": ClimateMode.CLIMATE_FAN_MEDIUM,
+    "HIGH": ClimateMode.CLIMATE_FAN_HIGH,
+    "FOCUS": ClimateMode.CLIMATE_FAN_FOCUS,
+    "DIFFUSE": ClimateMode.CLIMATE_FAN_DIFFUSE,
 }
 
 SUPPORTED_SWING_MODES_OPTIONS = {
@@ -67,7 +67,7 @@ SUPPORTED_SWING_MODES_OPTIONS = {
 
 SUPPORTED_CLIMATE_MODES_OPTIONS = {
     "OFF": ClimateMode.CLIMATE_MODE_OFF,  # Доступен всегда
-    "AUTO": ClimateMode.CLIMATE_MODE_AUTO,  # Доступен всегда
+    "AUTO": ClimateMode.CLIMATE_MODE_HEAT_COOL,  # Доступен всегда
     "COOL": ClimateMode.CLIMATE_MODE_COOL,
     "HEAT": ClimateMode.CLIMATE_MODE_HEAT,
     "DRY": ClimateMode.CLIMATE_MODE_DRY,
@@ -83,7 +83,7 @@ SUPPORTED_CLIMATE_PRESETS_OPTIONS = {
 
 VerticalSwingDirection = tclac_ns.enum("VerticalSwingDirection", True)
 VERTICAL_SWING_DIRECTION_OPTIONS = {
-    "UP_DOWN": VerticalSwingDirection.UPDOWN,
+    "UP_DOWN": VerticalSwingDirection.UP_DOWN,
     "UPSIDE": VerticalSwingDirection.UPSIDE,
     "DOWNSIDE": VerticalSwingDirection.DOWNSIDE,
 }
@@ -147,6 +147,7 @@ CONFIG_SCHEMA = cv.All(
     climate.climate_schema(tclacClimate)
     .extend(
         {
+            cv.Optional(REPEAT_TX): cv.boolean,
             cv.Optional(CONF_BEEPER, default=True): cv.boolean,
             cv.Optional(CONF_DISPLAY, default=True): cv.boolean,
             cv.Optional(CONF_RX_LED): pins.gpio_output_pin_schema,
@@ -320,6 +321,8 @@ def to_code(config):
     yield uart.register_uart_device(var, config)
     yield climate.register_climate(var, config)
 
+    if REPEAT_TX in config:
+        cg.add_define("REPEAT_TX")
     if CONF_BEEPER in config:
         cg.add(var.set_beeper_state(config[CONF_BEEPER]))
     if CONF_DISPLAY in config:

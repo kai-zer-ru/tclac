@@ -20,14 +20,41 @@ namespace tclac {
 
 #define SET_TEMP_MASK	0b00001111
 
-#define MODE_POS		7
-#define MODE_MASK		0b00111111
+// Сколько раз повторять командный кадр за одну отправку (обход маргинальной
+// линии TX 3.3В->5В без конвертера уровней). Повторы неблокирующие и
+// разнесены по времени, чтобы каждый был отдельной честной попыткой, а не
+// очередью, которую контроллер кондиционера глотает как один кадр.
+// С аппаратным конвертером уровней достаточно 1.
+#ifdef REPEAT_TX
+	#define TX_REPEAT				3
+#else
+	#define TX_REPEAT				1
+#endif
 
-#define MODE_AUTO		0b00110101
-#define MODE_COOL		0b00110001
-#define MODE_DRY		0b00110011
-#define MODE_FAN_ONLY	0b00110010
-#define MODE_HEAT		0b00110100
+
+// Пауза между повторами командного кадра
+#define TX_REPEAT_SPACING_MS	200
+// «Слушай, потом говори»: не передавать, пока линия занята приёмом.
+// Тишина на линии, после которой можно говорить (25мс ~= 24 байт-тайма на 9600):
+#define BUS_QUIET_MS			25
+// Окно ожидания ответа кондиционера после нашего опроса: в это окно командные
+// кадры не отправляем, пока ответ не пришёл (ответ ~64мс, старт в ~150мс)
+#define POLL_RESPONSE_WINDOW_MS	400
+// Максимум откладываний отправки из-за занятой линии (потом шлём как есть)
+#define TX_MAX_DEFERS			12
+
+#define MODE_POS		7
+// Бит 0b00100000 в байте режима — состояние ДИСПЛЕЯ кондиционера, он не
+// должен участвовать в определении режима (иначе с погашенным дисплеем
+// любой режим читается как "не распознан" и падает в default = AUTO)
+#define DISPLAY_BIT		0b00100000
+#define MODE_MASK		0b00001111
+
+#define MODE_AUTO		0b00000101
+#define MODE_COOL		0b00000001
+#define MODE_DRY		0b00000011
+#define MODE_FAN_ONLY	0b00000010
+#define MODE_HEAT		0b00000100
 
 #define FAN_SPEED_POS	8
 #define FAN_QUIET_POS	33
@@ -48,10 +75,6 @@ namespace tclac {
 #define SWING_VERTICAL		0b01000000
 #define SWING_BOTH			0b01100000
 #define SWING_MODE_MASK		0b01100000
-
-static constexpr size_t TCLAC_RX_PACKET_SIZE = 61;
-static constexpr uint8_t TCLAC_HEADER_BYTE = 0xBB;
-static constexpr uint8_t TCLAC_LENGTH_BYTE = 0x37;  // byte index 4, payload length field
 
 using climate::ClimateCall;
 using climate::ClimateMode;
@@ -92,10 +115,11 @@ class tclacClimate : public climate::Climate, public esphome::uart::UARTDevice, 
 
 	private:
 		uint8_t checksum;
+		uint8_t check = 0;
 		// dataTX с управлением состоит из 38 байт
 		uint8_t dataTX[38];
-		// А dataRX по прежнему из 61 байта
-		uint8_t dataRX[61];
+		// А dataRX в некоторых моделях разбухает до 68 байт
+		uint8_t dataRX[68];
 		// Команда запроса состояния
 		uint8_t poll[8] = {0xBB,0x00,0x01,0x04,0x02,0x01,0x00,0xBD};
 		// Инициализация и начальное наполнение переменных состоянй переключателей
@@ -110,6 +134,14 @@ class tclacClimate : public climate::Climate, public esphome::uart::UARTDevice, 
 		int target_temperature_set = 0;
 		uint8_t switch_climate_mode = 0;
 		bool allow_take_control = false;
+
+		// «Слушай, потом говори»: метки времени активности линии
+		uint32_t last_rx_ms_ = 0;    // последний принятый байт от кондиционера
+		uint32_t poll_sent_ms_ = 0;  // когда отправлен последний опрос статуса
+		uint8_t tx_size_ = 0;        // размер отправляемого кадра (для повторов)
+
+		bool bus_quiet_();
+		void try_send_frame_(uint8_t attempt, uint8_t defers_left);
 		
 		esphome::climate::ClimateTraits traits_;
 		
@@ -126,13 +158,16 @@ class tclacClimate : public climate::Climate, public esphome::uart::UARTDevice, 
 		void update() override;
 		void set_beeper_state(bool state);
 		void set_display_state(bool disp_state);
+		// Фактическое состояние дисплея кондиционера (синхронизируется из
+		// статусных кадров в readData)
+		bool get_display_state() { return this->display_status_; }
 		void dataShow(bool flow, bool shine);
 		void set_force_mode_state(bool f_state);
 		void set_rx_led_pin(GPIOPin *rx_led_pin);
 		void set_tx_led_pin(GPIOPin *tx_led_pin);
 		void sendData(uint8_t * message, uint8_t size);
 		void set_module_display_state(bool d_state);
-		static std::string getHex(uint8_t *message, uint8_t size);
+		static std::string getHex(const uint8_t *message, size_t size);
 		static uint8_t getChecksum(const uint8_t * message, size_t size);
 		void set_vertical_airflow(AirflowVerticalDirection v_airflow);
 		void set_horizontal_airflow(AirflowHorizontalDirection h_airflow);

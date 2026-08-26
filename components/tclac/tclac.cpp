@@ -4,12 +4,11 @@
 * Refactoring & component making:
 * Соловей с паяльником 15.03.2024
 **/
+#include <cmath>
+
 #include "esphome.h"
 #include "esphome/core/defines.h"
 #include "tclac.h"
-
-#include <cctype>
-#include <string>
 
 namespace esphome{
 namespace tclac{
@@ -22,7 +21,7 @@ ClimateTraits tclacClimate::traits() {
 	// Ответственно заявляю, что это все я взял у christoph5180
 	if (this->supported_modes_.empty()) {
 		traits.add_supported_mode(climate::CLIMATE_MODE_OFF);
-		traits.add_supported_mode(climate::CLIMATE_MODE_AUTO);
+		traits.add_supported_mode(climate::CLIMATE_MODE_HEAT_COOL);
 	} else {
 		for (auto mode : this->supported_modes_)
 			traits.add_supported_mode(mode);
@@ -62,47 +61,109 @@ void tclacClimate::setup() {
 #endif
 }
 
-void tclacClimate::loop() {
-	// Ждём полный пакет (61 байт @ 9600 ≈ 64 ms), иначе read() блокирует loop
-	if (this->available() < 1) {
-		return;
+void tclacClimate::loop()  {
+	// Если в буфере UART что-то есть, то читаем это что-то
+	if (esphome::uart::UARTDevice::available() > 0) {
+		// линия занята приёмом — отправку командных кадров придержим
+		this->last_rx_ms_ = millis();
+		dataShow(0, true);
+		dataRX[0] = esphome::uart::UARTDevice::read();
+		// Если принятый байт- не заголовок (0xBB), то просто покидаем цикл
+		if (dataRX[0] != 0xBB) {
+			ESP_LOGD("TCL", "Wrong byte");
+			dataShow(0,0);
+			return;
+		}
+		// А вот если совпал заголовок (0xBB), то начинаем чтение по цепочке еще 4 байт
+		// Иногда, для некоторых кондиционеров все же нужно добавить delay(5) между пакетами. Зачем- ХЗ, но так надо. Но не всегда. Хотя иногда- да. Но не каждый раз. Изредка. Случается.
+		// delay(5);
+		dataRX[1] = esphome::uart::UARTDevice::read();
+		// delay(5);
+		dataRX[2] = esphome::uart::UARTDevice::read();
+		// delay(5);
+		dataRX[3] = esphome::uart::UARTDevice::read();
+		// delay(5);
+		dataRX[4] = esphome::uart::UARTDevice::read();
+
+		//auto raw = getHex(dataRX, 5);
+		//ESP_LOGD("TCL", "first 5 byte : %s ", raw.c_str());
+
+		// ЗАЩИТА ОТ ПЕРЕПОЛНЕНИЯ: пятый байт — длина полезной части, дальше
+		// читается dataRX[4]+1 байт в dataRX+5. Легитимны только три длины
+		// кадра (0x37=61, 0x3b=65, 0x3e=68 байт всего). На шумной линии
+		// read() может вернуть -1 (0xFF) или прийти мусор — тогда dataRX[4]+6
+		// вышло бы за пределы dataRX[68]. Отбраковываем такой кадр.
+		if (dataRX[4] != 0x37 && dataRX[4] != 0x3b && dataRX[4] != 0x3e) {
+			ESP_LOGW("TCL", "Bad frame length 0x%02X, dropped", dataRX[4]);
+			while (esphome::uart::UARTDevice::available() > 0) esphome::uart::UARTDevice::read();
+			dataShow(0,0);
+			return;
+		}
+
+		// Из первых 5 байт нам нужен пятый- он содержит длину сообщения.
+		// read_array вернёт false при таймауте (кадр оборвался на полпути) —
+		// тогда в буфере мусор из прошлого кадра, разбирать его нельзя.
+		if (!esphome::uart::UARTDevice::read_array(dataRX+5, dataRX[4]+1)) {
+			ESP_LOGW("TCL", "Frame read timeout, dropped");
+			dataShow(0,0);
+			return;
+		}
+
+		// Добываем контрольную сумму:
+		if (dataRX[4] == 0x3e){
+			// Для пакета данных длиной 68 байт
+			check = getChecksum(dataRX, 68);
+		} else if (dataRX[4] == 0x37){
+			// Для пакета данных длиной 61 байт
+			check = getChecksum(dataRX, 61);
+		} else {
+			// Для пакета данных длиной 65 байт
+			check = getChecksum(dataRX, 65);
+		}
+
+		//raw = getHex(dataRX, sizeof(dataRX));
+		//ESP_LOGD("TCL", "RX full : %s ", raw.c_str());
+		
+		// Проверяем контрольную сумму:
+		if (dataRX[4] == 0x3e){
+			// Для пакета данных длиной 68 байт
+			if (check != dataRX[67]) {
+				ESP_LOGD("TCL", "Invalid checksum %x", check);
+				this->dataShow(0,0);
+				return;
+			} else {
+				//ESP_LOGD("TCL", "checksum OK %x", check);
+			}
+		} else if (dataRX[4] == 0x37){
+			if (check != dataRX[60]) {
+				// Для пакета данных длиной 61 байт
+				ESP_LOGD("TCL", "Invalid checksum %x", check);
+				this->dataShow(0,0);
+				return;
+			} else {
+				//ESP_LOGD("TCL", "checksum OK %x", check);
+			}
+		} else {
+			if (check != dataRX[64]) {
+				// Для пакета данных длиной 65 байт
+				ESP_LOGD("TCL", "Invalid checksum %x", check);
+				this->dataShow(0,0);
+				return;
+			} else {
+				//ESP_LOGD("TCL", "checksum OK %x", check);
+			}
+		}
+		this->dataShow(0,0);
+		// Прочитав все из буфера приступаем к разбору данных
+		this->readData();
 	}
-
-	// Синхронизация по заголовку 0xBB
-	uint8_t header = this->read();
-	if (header != TCLAC_HEADER_BYTE) {
-		ESP_LOGD("TCL", "Skipping byte 0x%02X", header);
-		this->dataShow(0, false);
-		return;
-	}
-
-	if (this->available() < TCLAC_RX_PACKET_SIZE - 1) {
-		ESP_LOGD("TCL", "Incomplete packet after header");
-		return;
-	}
-
-	this->dataShow(0, true);
-	this->dataRX[0] = header;
-	this->read_array(this->dataRX + 1, TCLAC_RX_PACKET_SIZE - 1);
-	this->dataShow(0, false);
-
-	if (this->dataRX[4] != TCLAC_LENGTH_BYTE) {
-		ESP_LOGD("TCL", "Invalid length byte 0x%02X", this->dataRX[4]);
-		return;
-	}
-
-	uint8_t check = getChecksum(this->dataRX, sizeof(this->dataRX));
-	if (check != this->dataRX[60]) {
-		ESP_LOGD("TCL", "Invalid checksum 0x%02X", check);
-		return;
-	}
-
-	this->readData();
 }
 
 void tclacClimate::update() {
 	tclacClimate::dataShow(1,1);
 	this->esphome::uart::UARTDevice::write_array(poll, sizeof(poll));
+	// после опроса кондиционер начнёт отвечать — командные кадры подождут
+	this->poll_sent_ms_ = millis();
 	//auto raw = tclacClimate::getHex(poll, sizeof(poll));
 	ESP_LOGD("TCL", "chek status sended");
 	tclacClimate::dataShow(1,0);
@@ -110,7 +171,9 @@ void tclacClimate::update() {
 
 void tclacClimate::readData() {
 	
-	current_temperature = float((( (dataRX[17] << 8) | dataRX[18] ) / 374 - 32)/1.8);
+	// Эту конструкцию предложила нейронка Claude, я вообще не понимаю таких изысков, так что вставляю как есть.
+	current_temperature = ((float)((dataRX[17] << 8) | dataRX[18]) / 374.0f - 32.0f) / 1.8f;
+	
 	target_temperature = (dataRX[FAN_SPEED_POS] & SET_TEMP_MASK) + 16;
 
 	//ESP_LOGD("TCL", "TEMP: %f ", current_temperature);
@@ -118,13 +181,20 @@ void tclacClimate::readData() {
 	if (dataRX[MODE_POS] & ( 1 << 4)) {
 		// Если кондиционер включен, то разбираем данные для отображения
 		ESP_LOGD("TCL", "AC is on");
+
+		// Синхронизируем состояние дисплея с фактическим (бит DISPLAY_BIT в
+		// байте режима): пультом дисплей переключается мимо модуля, и без
+		// синхронизации следующая команда модуля перетирала бы состояние
+		// дисплея старым значением. Только когда кондиционер включён.
+		this->display_status_ = (dataRX[MODE_POS] & DISPLAY_BIT) != 0;
+
 		uint8_t modeswitch = MODE_MASK & dataRX[MODE_POS];
 		uint8_t fanspeedswitch = FAN_SPEED_MASK & dataRX[FAN_SPEED_POS];
 		uint8_t swingmodeswitch = SWING_MODE_MASK & dataRX[SWING_POS];
 
 		switch (modeswitch) {
 			case MODE_AUTO:
-				this->mode = climate::CLIMATE_MODE_AUTO;
+				this->mode = climate::CLIMATE_MODE_HEAT_COOL;
 				break;
 			case MODE_COOL:
 				this->mode = climate::CLIMATE_MODE_COOL;
@@ -139,35 +209,35 @@ void tclacClimate::readData() {
 				this->mode = climate::CLIMATE_MODE_HEAT;
 				break;
 			default:
-				this->mode = climate::CLIMATE_MODE_AUTO;
+				this->mode = climate::CLIMATE_MODE_HEAT_COOL;
 		}
 
 		if ( dataRX[FAN_QUIET_POS] & FAN_QUIET) {
-			this->set_fan_mode_(climate::CLIMATE_FAN_QUIET);
+			fan_mode = climate::CLIMATE_FAN_QUIET;
 		} else if (dataRX[MODE_POS] & FAN_DIFFUSE){
-			this->set_fan_mode_(climate::CLIMATE_FAN_DIFFUSE);
+			fan_mode = climate::CLIMATE_FAN_DIFFUSE;
 		} else {
 			switch (fanspeedswitch) {
 				case FAN_AUTO:
-					this->set_fan_mode_(climate::CLIMATE_FAN_AUTO);
+					fan_mode = climate::CLIMATE_FAN_AUTO;
 					break;
 				case FAN_LOW:
-					this->set_fan_mode_(climate::CLIMATE_FAN_LOW);
+					fan_mode = climate::CLIMATE_FAN_LOW;
 					break;
 				case FAN_MIDDLE:
-					this->set_fan_mode_(climate::CLIMATE_FAN_MIDDLE);
+					fan_mode = climate::CLIMATE_FAN_MIDDLE;
 					break;
 				case FAN_MEDIUM:
-					this->set_fan_mode_(climate::CLIMATE_FAN_MEDIUM);
+					fan_mode = climate::CLIMATE_FAN_MEDIUM;
 					break;
 				case FAN_HIGH:
-					this->set_fan_mode_(climate::CLIMATE_FAN_HIGH);
+					fan_mode = climate::CLIMATE_FAN_HIGH;
 					break;
 				case FAN_FOCUS:
-					this->set_fan_mode_(climate::CLIMATE_FAN_FOCUS);
+					fan_mode = climate::CLIMATE_FAN_FOCUS;
 					break;
 				default:
-					this->set_fan_mode_(climate::CLIMATE_FAN_AUTO);
+					fan_mode = climate::CLIMATE_FAN_AUTO;
 			}
 		}
 
@@ -187,22 +257,22 @@ void tclacClimate::readData() {
 		}
 		
 		// Обработка данных о пресете
-		this->set_preset_(ClimatePreset::CLIMATE_PRESET_NONE);
+		preset = ClimatePreset::CLIMATE_PRESET_NONE;
 		if (dataRX[7] & (1 << 6)){
-			this->set_preset_(ClimatePreset::CLIMATE_PRESET_ECO);
+			preset = ClimatePreset::CLIMATE_PRESET_ECO;
 		} else if (dataRX[9] & (1 << 2)){
-			this->set_preset_(ClimatePreset::CLIMATE_PRESET_COMFORT);
+			preset = ClimatePreset::CLIMATE_PRESET_COMFORT;
 		} else if (dataRX[19] & (1 << 0)){
-			this->set_preset_(ClimatePreset::CLIMATE_PRESET_SLEEP);
+			preset = ClimatePreset::CLIMATE_PRESET_SLEEP;
 		}
 		
 	} else {
 		ESP_LOGD("TCL", "AC is OFF");
 		// Если кондиционер выключен, то все режимы показываются, как выключенные
 		this->mode = climate::CLIMATE_MODE_OFF;
-		this->fan_mode.reset();
+		//fan_mode = climate::CLIMATE_FAN_OFF;
 		this->swing_mode = climate::CLIMATE_SWING_OFF;
-		this->set_preset_(ClimatePreset::CLIMATE_PRESET_NONE);
+		this->preset = ClimatePreset::CLIMATE_PRESET_NONE;
 	}
 	// Публикуем данные
 	this->publish_state();
@@ -211,25 +281,35 @@ void tclacClimate::readData() {
 
 // Climate control
 void tclacClimate::control(const climate::ClimateCall &call) {
+	
 	ESP_LOGD("TCL", "Call from UI");
 
-	// ESPHome передаёт только изменённые поля; пустой optional — «не менять».
-	if (call.get_mode().has_value()) {
-		this->mode = *call.get_mode();
-	}
-	if (call.get_target_temperature().has_value()) {
-		this->target_temperature = *call.get_target_temperature();
-	}
-	if (call.get_fan_mode().has_value()) {
-		this->set_fan_mode_(*call.get_fan_mode());
-	}
-	if (call.get_swing_mode().has_value()) {
-		this->swing_mode = *call.get_swing_mode();
-	}
-	if (call.get_preset().has_value()) {
-		this->set_preset_(*call.get_preset());
+	// ЗАЩИТА ОТ ЭХО-ПЕТЛИ: команда, не меняющая текущее состояние, игнорируется.
+	// Интеграции (например, клиент Яндекс.Алисы или MQTT-мост) могут отражать
+	// состояние обратно в команду; без этой проверки эхо-кадр повторно вызывал
+	// бы control() -> публикацию состояния -> снова эхо, и получался шторм.
+	bool changed = false;
+	if (call.get_mode().has_value() && *call.get_mode() != this->mode) changed = true;
+	if (call.get_target_temperature().has_value()
+		&& (int) *call.get_target_temperature() != (int) this->target_temperature) changed = true;
+	if (call.get_fan_mode().has_value()
+		&& (!this->fan_mode.has_value() || *call.get_fan_mode() != this->fan_mode.value())) changed = true;
+	if (call.get_swing_mode().has_value() && *call.get_swing_mode() != this->swing_mode) changed = true;
+	if (call.get_preset().has_value()
+		&& (!this->preset.has_value() || *call.get_preset() != this->preset.value())) changed = true;
+	if (!changed) {
+		ESP_LOGD("TCL", "Call from UI: no changes, skipped");
+		return;
 	}
 
+	// А это и ниже я подрезал у Vi3jo.
+
+	if (call.get_mode().has_value()) this->mode = *call.get_mode();
+    if (call.get_target_temperature().has_value()) this->target_temperature = *call.get_target_temperature();
+    if (call.get_fan_mode().has_value()) this->fan_mode = *call.get_fan_mode();
+	if (call.get_swing_mode().has_value()) this->swing_mode = *call.get_swing_mode();
+	if (call.get_preset().has_value()) this->preset = *call.get_preset();
+	
 	this->publish_state();
 	this->takeControl();
 	this->allow_take_control = true;
@@ -247,6 +327,11 @@ void tclacClimate::takeControl() {
 	dataTX[32] = 0b00000000;
 	dataTX[33] = 0b00000000;
 	
+	// Защита от мусора в байте уставки: до первого статусного кадра
+	// target_temperature = NaN, а (int)NaN — неопределённое поведение.
+	if (std::isnan(target_temperature) || target_temperature < 16 || target_temperature > 31) {
+		target_temperature = 24;
+	}
 	uint8_t target_temperature_set = 31-(int)target_temperature;
 	
 	// Включаем или отключаем пищалку в зависимости от переключателя в настройках
@@ -277,7 +362,7 @@ void tclacClimate::takeControl() {
 			dataTX[7] += 0b00000000;
 			dataTX[8] += 0b00000000;
 			break;
-		case climate::CLIMATE_MODE_AUTO:
+		case climate::CLIMATE_MODE_HEAT_COOL:
 			dataTX[7] += 0b00000100;
 			dataTX[8] += 0b00001000;
 			break;
@@ -296,6 +381,10 @@ void tclacClimate::takeControl() {
 		case climate::CLIMATE_MODE_HEAT:
 			dataTX[7] += 0b00000100;
 			dataTX[8] += 0b00000001;	
+			break;
+		case climate::CLIMATE_MODE_AUTO:
+			// Этот режим ESPHome не используется компонентом TCLAC.
+			// Для автоматического режима TCLAC использует CLIMATE_MODE_HEAT_COOL.
 			break;
 	}
 
@@ -334,6 +423,10 @@ void tclacClimate::takeControl() {
 				dataTX[8]	+= 0b01000000;
 				dataTX[10]	+= 0b00000000;
 				break;
+			case climate::CLIMATE_FAN_ON:
+			case climate::CLIMATE_FAN_OFF:
+				// Эти общие режимы ESPHome не поддерживаются протоколом TCLAC.
+				break;
 		}
 	}
 	
@@ -370,6 +463,12 @@ void tclacClimate::takeControl() {
 				break;
 			case ClimatePreset::CLIMATE_PRESET_COMFORT:
 				dataTX[8]	+= 0b00010000;
+				break;
+			case ClimatePreset::CLIMATE_PRESET_HOME:
+			case ClimatePreset::CLIMATE_PRESET_AWAY:
+			case ClimatePreset::CLIMATE_PRESET_BOOST:
+			case ClimatePreset::CLIMATE_PRESET_ACTIVITY:
+				// Эти стандартные пресеты ESPHome не поддерживаются протоколом TCLAC.
 				break;
 		}
 	}
@@ -530,6 +629,7 @@ void tclacClimate::takeControl() {
 	dataTX[26] = 0x00;	//??
 	dataTX[27] = 0x00;	//??
 	dataTX[28] = 0x00;	//??
+	dataTX[29] = 0x00;	//??
 	dataTX[30] = 0x00;	//??
 	dataTX[31] = 0x00;	//??
 	//dataTX[32] = 0x00;	//0,0,0,режим вертикального качания(2),режим вертикальной фиксации(3)
@@ -545,28 +645,73 @@ void tclacClimate::takeControl() {
 	is_call_control = false;
 }
 
-// Отправка данных в кондиционер
+// Отправка данных в кондиционер.
+// Стратегия надёжности на линии без конвертера уровней (3.3В -> 5В UART):
+//  1) «Слушай, потом говори»: не передавать, пока кондиционер сам передаёт
+//     (или мы ждём его ответ на опрос) — контроллер кондиционера де-факто
+//     полудуплексный и теряет кадры, принятые во время своей передачи.
+//  2) TX_REPEAT повторов кадра с паузой TX_REPEAT_SPACING_MS — каждый повтор
+//     отдельная честная попытка (очередь впритык глотается как один кадр).
+// Кадры идемпотентны: кондиционер применит первый корректно принятый.
+// Всё неблокирующее (set_timeout), loop() не замораживается.
 void tclacClimate::sendData(uint8_t * message, uint8_t size) {
 	tclacClimate::dataShow(1,1);
-	//Serial.write(message, size);
-	this->esphome::uart::UARTDevice::write_array(message, size);
-	//auto raw = getHex(message, size);
-	ESP_LOGD("TCL", "Message to TCL sended...");
+	this->tx_size_ = size;  // message всегда указывает на dataTX (член класса)
+	for (uint8_t k = 0; k < TX_REPEAT; k++) {
+		if (k == 0) {
+			this->try_send_frame_(0, TX_MAX_DEFERS);
+		} else {
+			this->set_timeout(k * TX_REPEAT_SPACING_MS, [this, k]() {
+				this->try_send_frame_(k, TX_MAX_DEFERS);
+			});
+		}
+	}
+	ESP_LOGD("TCL", "Message to TCL queued (x%d, spacing %dms)", TX_REPEAT, TX_REPEAT_SPACING_MS);
 	tclacClimate::dataShow(1,0);
 }
 
-// Преобразование байта в читабельный формат
-std::string tclacClimate::getHex(uint8_t *message, uint8_t size) {
-	std::string raw;
-	for (int i = 0; i < size; i++) {
-		raw += "\n" + std::to_string(message[i]);
-	}
-	for (char &c : raw) {
-		c = toupper(static_cast<unsigned char>(c));
-	}
-	return raw;
+// Свободна ли линия для передачи
+bool tclacClimate::bus_quiet_() {
+	const uint32_t now = millis();
+	// прямо сейчас идёт приём
+	if (esphome::uart::UARTDevice::available() > 0)
+		return false;
+	// приём был только что — кадр может продолжаться
+	if (now - this->last_rx_ms_ < BUS_QUIET_MS)
+		return false;
+	// мы отправили опрос и ответ ещё не начал приходить — не влезаем
+	if (now - this->poll_sent_ms_ < POLL_RESPONSE_WINDOW_MS
+		&& (int32_t)(this->last_rx_ms_ - this->poll_sent_ms_) < 0)
+		return false;
+	return true;
 }
 
+// Отправить кадр, если линия свободна; иначе отложить на BUS_QUIET_MS
+void tclacClimate::try_send_frame_(uint8_t attempt, uint8_t defers_left) {
+	if (!this->bus_quiet_() && defers_left > 0) {
+		this->set_timeout(BUS_QUIET_MS,
+			[this, attempt, defers_left]() {
+				this->try_send_frame_(attempt, defers_left - 1);
+			});
+		return;
+	}
+	this->esphome::uart::UARTDevice::write_array(this->dataTX, this->tx_size_);
+	this->esphome::uart::UARTDevice::flush();
+}
+
+// Преобразование байта в читабельный формат.
+// Используется std::string вместо Arduino String,
+// поэтому функция работает как с Arduino, так и с ESP-IDF.
+std::string tclacClimate::getHex(const uint8_t *message, size_t size) {
+	std::string raw;
+
+	for (size_t i = 0; i < size; i++) {
+		raw += "\n";
+		raw += std::to_string(message[i]);
+	}
+
+	return raw;
+}
 // Вычисление контрольной суммы
 uint8_t tclacClimate::getChecksum(const uint8_t * message, size_t size) {
 	uint8_t position = size - 1;

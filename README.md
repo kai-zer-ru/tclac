@@ -1,9 +1,12 @@
+If you don't understand Russian, use a translator. It will be easier for you to understand the meaning of the text after it's translated into your language, since it's familiar to you. But if I were to translate from mine into yours, it would be complete crap. By the way, this was also translated. Looks okay, huh?
+
 Внешний компонент кондиционеров TCL и аналогов для Home Assistant, используя ESPHome.
 Поддерживаются кондиционеры типа TAC-07CHSA и подобные. Увы, предположить точно получится подключить кондиционер или нет практически
 невозможно из-за огромного разбега в комплектациях: даже одна и та же модель, буквально буква-в-букву может, например, не иметь
 родного модуля WiFI, не иметь провода с USB разъемом или вовсе на плате управления может не быть впаян разъем UART.
 Однако, в целом, с пайкой или без, проверены следующие кондиционеры:
 - Axioma ASX09H1/ASB09H1
+- Ballu BSAI-12HN1_15Y
 - Ballu Discovery DC BSVI-07HN8
 - Ballu Discovery DC BSVI-09HN8
 - Ballu Discovery DC BSVI-12HN8
@@ -13,7 +16,10 @@
 - Daichi DA35EVQ1-1/DF35EV1-1
 - Dantex RK-12SATI/RK-12SATIE
 - Ecostar Radium KVS-RAD09CH
+- iFFALCON F1 18
 - Royal Clima Gloria Inverter
+- Royal Clima Pandora RC-PDC28HN
+- Tesla TT27TP61S-0932IAWUV
 - TCL ELI ONF 12
 - TCL Liferise ONF 09
 - TCL TAC-CT09INV/R
@@ -27,7 +33,9 @@
 - TCL TAC-XAL24I
 - TCL TPG31IHB
 
-Компоненту требуется HomeAsistant и ESPHome версии не ниже 2023.3.0 !
+Компонент поддерживает длину сообщений от кондиционера в 61, 65 и 68 байт, однако, полноценно проверялся только с 61 байтовыми сообщениями.
+
+Компоненту требуется HomeAsistant и ESPHome версии не ниже 2026.4.0 !
 ____
 Это все для работы ИСКЛЮЧИТЕЛЬНО с HomeAsistant и ESPHome. Если Вас интересует другие варианты или возможность подключить кондиционер
 как-то иначе к каким-то другим системам, то мне есть что предложить:
@@ -40,6 +48,10 @@ ____
 случиться именно с Вами- прошу сообщить мне на Дзене, приму меры.
 Подробное описание будет постепенно появляться [в моем канале на Дзене](https://dzen.ru/a/ZmdoyUNswXWnulhg) , сюда буду выкладывать
 самое важное по мере сил.
+
+Выразить благодарность в России и Беларуси: карта Озон-банка 2204 3211 5682 2009
+
+Thank the author for the work: [My Steam account](https://steamcommunity.com/id/solovey-iron/) (yep, I like computer games)
 ____
 Образец для конфигурации ESPHome в файле TCL-Conditioner.yaml , упрощенный вариант конфигурации- Sample_conf.yaml . Скачайте к себе
 и используйте в ESPHome, или просто скопируйте из него всю конфигурацию и вставьте вместо своей, однако, не забыв отредактировать
@@ -76,6 +88,18 @@ esphome:
 
 **!Важно не забыть закомментировать или удалить строки других платформ!**
 
+## Настройка IP адреса
+По умолчанию, IP адрес получается автоматически от DHCP сервера. Однако, можно назначить
+IP адрес вручную. Для этого в самом конце файла конфигурации добавьте следующее:
+
+```yaml
+wifi:
+  manual_ip:
+    static_ip: 192.168.1.4
+    gateway: 192.168.1.1
+    subnet: 255.255.255.0
+```
+
 ## Настройка подгружаемых файлов
 Для добавления или удаления определенных частей конфига я решил использовать подгружаемые файлы- они загружаются ESPHome автоматически,
 если у сервера с Home Assistant есть доступ в интернет. Такой подход позволяет редактировать и обновлять не весь конфиг куском,
@@ -85,7 +109,7 @@ esphome:
 ```yaml
 packages:
   remote_package:
-    url: https://github.com/I-am-nightingale/tclac.git
+    url: https://github.com/kai-zer-ru/tclac.git
     ref: master
     files:
     # v - равнение строк с опциями вот по этой позиции, иначе глючить будет
@@ -102,7 +126,7 @@ packages:
 ```yaml
 packages:
   remote_package:
-    url: https://github.com/I-am-nightingale/tclac.git
+    url: https://github.com/kai-zer-ru/tclac.git
     ref: master
     files:
     # v - равнение строк с опциями вот по этой позиции, иначе глючить будет
@@ -110,11 +134,41 @@ packages:
       - packages/leds.yaml
     refresh: 30s
 ```
+Например, так подключается 3 кратный повтор отправки комманд в случае, если связь плохая (packages/bad_connect.yaml):
+
+```yaml
+packages:
+  remote_package:
+    url: https://github.com/kai-zer-ru/tclac.git
+    ref: master
+    files:
+    # v - равнение строк с опциями вот по этой позиции, иначе глючить будет
+      - packages/core.yaml # Ядро всего сущего
+      - packages/leds.yaml
+	  - packages/bad_connect.yaml
+    refresh: 30s
+```
+
+А так подключается переключатель скорости UART в настройках для тех, у кого кондиционер работает на другой скорости (packages/uart_speed.yaml):
+
+```yaml
+packages:
+  remote_package:
+    url: https://github.com/kai-zer-ru/tclac.git
+    ref: master
+    files:
+    # v - равнение строк с опциями вот по этой позиции, иначе глючить будет
+      - packages/core.yaml # Ядро всего сущего
+      - packages/leds.yaml
+	  - packages/uart_speed.yaml
+    refresh: 30s
+```
+
 А вот так уже **не правильно:**
 ```yaml
 packages:
   remote_package:
-    url: https://github.com/I-am-nightingale/tclac.git
+    url: https://github.com/kai-zer-ru/tclac.git
     ref: master
     files:
     # v - равнение строк с опциями вот по этой позиции, иначе глючить будет
